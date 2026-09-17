@@ -1261,13 +1261,15 @@ static int coli_cuda_load(void){
 
 #ifdef COLI_HIP_DLL
     /* No synchronisation here, and that is a traced conclusion rather than an
-     * assumption: startup discovery (coli_cuda_available_device_count) and
-     * coli_cuda_init run before the tier's worker threads are created.
-     * colibri.c calls init on the main
-     * thread before model initialisation and therefore before any worker
-     * thread exists, and the ragged path is reachable only after that init
-     * succeeded. If a concurrent caller ever appears, or the guard in colibri.c
-     * moves, this needs an explicit lock instead. */
+     * assumption: coli_cuda_load has three callers: coli_cuda_init,
+     * coli_cuda_available_device_count and coli_cuda_attention_project_ragged.
+     * colibri.c calls init on the main thread before model initialisation and
+     * before any worker thread exists. qwen36_tier.c's qt_init asks for the
+     * available count on that main thread during model load, while choosing
+     * the devices to pass to init and before creating the tier's workers.
+     * The ragged path is reachable only after init succeeded. If a concurrent
+     * caller ever appears, or either start-up path moves outside this window,
+     * this needs an explicit lock instead. */
     if(!coli_hip_configure(&cfg)) return 0;
     runtime = coli_hip_acquire_runtime(&cfg);
     if(!runtime){
@@ -1519,7 +1521,11 @@ int coli_cuda_device_count(void){
 
 /* qwen36_tier.c's device selection asks for the usable count; the loader had
  * no wrapper for it, so the first CUDA_DLL build of qwen36 that compiled the
- * tier in failed to link (#1533). */
+ * tier in failed to link (#1533). Device selection precedes coli_cuda_init,
+ * so this wrapper must load the DLL itself, as the ragged-attention wrapper
+ * does. Merely checking g_cuda.available silently returned zero before init.
+ * An older DLL without this export cannot discover visible devices through
+ * device_count: that function counts contexts created by init. */
 int coli_cuda_available_device_count(void){
     /* The tier probes before init when no device list was supplied. */
     if(!coli_cuda_load()) return 0;
